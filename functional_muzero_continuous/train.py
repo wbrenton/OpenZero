@@ -4,8 +4,8 @@ import optax
 import haiku as hk
 import jax.numpy as jnp
 from datetime import datetime
-from brax.v2.envs import wrapper
-from brax.v2 import envs as envs_v2
+from brax.envs import wrappers as wrapper
+from brax import envs as envs_v2
 
 from loss import make_loss_fn
 from mcts import make_mcts_fn
@@ -14,7 +14,7 @@ from annotations import TrainState, TimeStep
 from utils import make_broadcast_across_action_dims_fn, unpmap, make_action_discretization_fns
 
 def train(num_timesteps = 10_000_000_000,
-          batch_size = 1024,
+          batch_size = 32,
           num_envs = 1024,
           action_repeat = 1,
           td_steps=5,
@@ -44,9 +44,8 @@ def train(num_timesteps = 10_000_000_000,
     env = envs_v2.get_environment("ant")
     env = wrapper.wrap_for_training(env, episode_length=episode_length, action_repeat=action_repeat)
 
-    reset_fn = jax.jit(jax.vmap(env.reset))
     eval_reset_fn = jax.jit(env.reset)
-    eval_step_fn = jax.jit(env.step)
+    reset_fn = jax.jit(jax.vmap(env.reset))
 
     ### TODO: create obs normalization with brax.running_statistics.normalize
 
@@ -163,8 +162,9 @@ def train(num_timesteps = 10_000_000_000,
                              state=state,
                              opt_state=opt_state,
                              train_step=0)
+
     train_state = jax.device_put_replicated(train_state, devices=local_devices)
-    
+
     key_envs = jax.random.split(next(rng_seq), batch_size // process_count)
     key_envs = jnp.reshape(key_envs, (device_count, -1) + key_envs.shape[1:])
     env_states = reset_fn(key_envs)
@@ -173,23 +173,26 @@ def train(num_timesteps = 10_000_000_000,
     eval_fn = make_eval_fn()
     metrics = eval_fn(train_state, next(rng_seq))
     print(f'epoch: {0}, initial_reward: {metrics["scalar_reward"].sum()} action: {metrics["action"][0]}')
-    
+
     rngs = jax.random.split(next(rng_seq), device_count)
     t = datetime.now()
     for epoch in range(1, num_epochs + 1):
         train_state, env_states, train_metrics = training_epoch_fn(train_state, env_states, rngs)
         train_metrics = jax.tree_map(lambda x: x.mean(0), train_metrics)
         train_metrics = jax.tree_map(lambda x: x.block_until_ready(), train_metrics)
-        
+
         if epoch % 10 == 0:
             d_t = datetime.now() - t
             metrics = eval_fn(train_state, next(rng_seq))
             train_steps = train_state.train_step[0]
             print(f'epoch: {epoch}, train steps: {train_steps} loss: {train_metrics["scalar_loss"].mean()}, reward: {train_metrics["scalar_reward"].mean()} time: {d_t} test_reward: {metrics["scalar_reward"].sum()}')
             t = datetime.now()
-        
+
         rngs = jax.random.split(next(rng_seq), device_count)
 
 # look at how brax did it, there may be something to preconfiguring tthe params to be an arg to scan
 #with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
-train()
+
+env = envs_v2.get_environment("ant")
+train(observation_size=env.observation_size,
+      action_size=env.action_size)

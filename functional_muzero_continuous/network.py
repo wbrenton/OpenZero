@@ -37,9 +37,9 @@ class DynamicsNetwork(hk.Module):
         return next_latent_rep, reward.squeeze(-1)
 
 class PredictionNetwork(hk.Module):
-    def __init__(self, torso_hiddens, action_dim_support, name='f'):
+    def __init__(self, torso_hiddens, action_dim_support, prediction_net_layers, name='f'):
         super().__init__(name=name)
-        self.torso = _torso(torso_hiddens, num_layers=4)
+        self.torso = _torso(torso_hiddens, prediction_net_layers)
         self.value_head = hk.Linear(1)
         self.policy_head = hk.Linear(action_dim_support)
 
@@ -50,15 +50,16 @@ class PredictionNetwork(hk.Module):
         return policy, value.squeeze(-1)
 
 
-def make_muzero_network(num_torso_layers=10,
-                        torso_hidden_size=512,
-                        action_dim_support=7):
+def make_muzero_network(num_torso_layers=1,
+                        torso_hidden_size=32,
+                        action_dim_support=7, 
+                        prediction_net_layers=1):
     """Creates a MuZero network along with subnetworks."""
 
     def fn():
         representation = RepresentationNetwork(num_torso_layers, torso_hidden_size)
         dynamics = DynamicsNetwork(num_torso_layers, torso_hidden_size)
-        prediction = PredictionNetwork(torso_hidden_size, action_dim_support)
+        prediction = PredictionNetwork(torso_hidden_size, action_dim_support, prediction_net_layers)
         
         def h(observation):
             return representation(observation)
