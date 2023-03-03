@@ -14,30 +14,32 @@ from annotations import TrainState, TimeStep
 from utils import make_broadcast_across_action_dims_fn, unpmap, make_action_discretization_fns
 
 def train(num_timesteps = 10_000_000_000,
-          batch_size = 32,
+          batch_size = 1024,
           num_envs = 1024,
           action_repeat = 1,
           td_steps=5,
           unroll_length = 10,
           episode_length = 1000,
           eval_length = 100,
-          num_epochs = 100_000,
+          num_epochs = 10_000,
           observation_size = 27,
           action_size = 8,
           action_dim_support = 7,
           num_simulations = 50,
           discount=0.99,
           target_update_period=100,
-          num_eval_episodes=10,):
+          num_eval_episodes=10):
 
     process_count = jax.process_count()
     device_count = jax.device_count()
     local_devices = jax.local_devices()
+    print(device_count)
 
     # calculate number of training steps per epoch
     env_steps_per_training_step = (batch_size * unroll_length * action_repeat)
     num_train_steps_per_epoch = -(-num_timesteps // (num_epochs * env_steps_per_training_step))
     total_train_steps = num_train_steps_per_epoch * num_epochs
+    print(num_train_steps_per_epoch)
 
     # setup environment
     rng_seq = hk.PRNGSequence(42)
@@ -45,14 +47,14 @@ def train(num_timesteps = 10_000_000_000,
     env = wrapper.wrap_for_training(env, episode_length=episode_length, action_repeat=action_repeat)
 
     eval_reset_fn = jax.jit(env.reset)
-    reset_fn = jax.jit(jax.vmap(env.reset))
+    reset_fn = jax.jit(jax.vmap(env.reset)) 
 
     ### TODO: create obs normalization with brax.running_statistics.normalize
 
     muzero_network_tx = make_muzero_network()
     apply = make_apply_fns(muzero_network_tx.apply, action_size, action_dim_support)
     optim = optax.adam(10e-4)
-    
+
     broadcast_across_action_dim = make_broadcast_across_action_dims_fn(action_size)
     
     loss_fn = make_loss_fn(td_steps)
@@ -128,7 +130,7 @@ def train(num_timesteps = 10_000_000_000,
         return train_state, env_state, metrics
     
     def make_eval_fn():
-        
+
         def eval_fn(train_state, rng):
         
             def eval_rollout_fn(env_state, rng):
@@ -144,13 +146,13 @@ def train(num_timesteps = 10_000_000_000,
             params, state = train_state.params, train_state.state
             reset_rng = jax.random.split(rng, num_eval_episodes)
             env_states = eval_reset_fn(reset_rng)
-            
+
             step_rngs = jax.random.split(rng, eval_length) #episode_length)
             _, metrics = jax.lax.scan(eval_rollout_fn, env_states, step_rngs)
             return metrics
-        
+
         return jax.jit(eval_fn)
-    
+
     training_epoch_fn = jax.pmap(training_epoch_fn, axis_name='i')
     
     obs = jnp.zeros((1, observation_size))
@@ -175,23 +177,19 @@ def train(num_timesteps = 10_000_000_000,
     print(f'epoch: {0}, initial_reward: {metrics["scalar_reward"].sum()} action: {metrics["action"][0]}')
 
     rngs = jax.random.split(next(rng_seq), device_count)
-    t = datetime.now()
     for epoch in range(1, num_epochs + 1):
+        t = datetime.now()
         train_state, env_states, train_metrics = training_epoch_fn(train_state, env_states, rngs)
         train_metrics = jax.tree_map(lambda x: x.mean(0), train_metrics)
-        train_metrics = jax.tree_map(lambda x: x.block_until_ready(), train_metrics)
+        jax.tree_map(lambda x: x.block_until_ready(), train_metrics)
 
-        if epoch % 10 == 0:
-            d_t = datetime.now() - t
-            metrics = eval_fn(train_state, next(rng_seq))
-            train_steps = train_state.train_step[0]
-            print(f'epoch: {epoch}, train steps: {train_steps} loss: {train_metrics["scalar_loss"].mean()}, reward: {train_metrics["scalar_reward"].mean()} time: {d_t} test_reward: {metrics["scalar_reward"].sum()}')
-            t = datetime.now()
-
+        #if epoch % 5 == 0:
+        metrics = eval_fn(train_state, next(rng_seq))
+        train_steps = train_state.train_step[0]
         rngs = jax.random.split(next(rng_seq), device_count)
+        d_t = datetime.now() - t
+        print(f'epoch: {epoch}, train steps: {train_steps} loss: {train_metrics["scalar_loss"].mean()}, reward: {train_metrics["scalar_reward"].mean()} time: {d_t} test_reward: {metrics["scalar_reward"].sum()}')
 
-# look at how brax did it, there may be something to preconfiguring tthe params to be an arg to scan
-#with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
 
 env = envs_v2.get_environment("ant")
 train(observation_size=env.observation_size,
